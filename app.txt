@@ -1,0 +1,656 @@
+const express = require('express');
+const session = require('express-session');
+const ActiveDirectory = require('activedirectory2');
+const path = require('path');
+const hbs = require('hbs');
+const ldap = require('ldapjs');
+
+
+const { Attribute } = require('@ldapjs/attribute');
+
+const bodyParser = require('body-parser');
+
+const app = express();
+const PORT = 3000;
+
+// ActiveDirectory2 config
+const adConfig = {
+  url: 'ldaps://BHDC1.blackhawk.k12.wi.us:636',
+  baseDN: 'DC=blackhawk,DC=k12,DC=wi,DC=us',
+  username: 'tvadmin@blackhawk.k12.wi.us',
+  password: 'Geemoof9.!'
+};
+
+const ad = new ActiveDirectory(adConfig);
+
+// Express + HBS setup
+app.set('view engine', 'hbs');
+app.set('views', path.join(__dirname, 'views'));
+hbs.registerHelper('eq', (a, b) => a === b);
+
+app.use(express.urlencoded({ extended: false }));
+app.use(express.json());
+app.use(bodyParser.json());
+app.use(express.static('public'));
+app.use(session({
+  secret: 'ldapSecret',
+  resave: false,
+  saveUninitialized: false
+}));
+
+// Authentication middleware
+function ensureAuthenticated(req, res, next) {
+  if (req.session.user) {
+    return next();
+  }
+  res.redirect('/');
+}
+
+// ----------------------
+// Routes
+
+// Login page
+app.get('/', (req, res) => {
+  res.render('login');
+});
+
+// Handle login
+app.post('/login', async (req, res) => {
+    const { username, password } = req.body;
+  
+    if (!username || !password) {
+      return res.render('login', { error: 'Username and password are required.' });
+    }
+  
+    const userPrincipalName = `${username}@blackhawk.k12.wi.us`;
+  
+    try {
+      ad.authenticate(userPrincipalName, password, (err, auth) => {
+        if (err) {
+          console.error('LDAP authentication error:', err);
+          return res.render('login', {
+            error: 'Authentication error. Please contact admin.',
+            username: username
+          });
+        }
+  
+        if (!auth) {
+          return res.render('login', {
+            error: 'Invalid username or password.',
+            username: username
+          });
+        }
+  
+        // Authentication successful
+        req.session.user = {
+          username: username,
+          userPrincipalName: userPrincipalName
+        };
+  
+        console.log(`User ${userPrincipalName} logged in successfully`);
+        res.redirect('/dashboard/users');
+      });
+    } catch (e) {
+      console.error('Unexpected error during login:', e);
+      res.render('login', { error: 'Unexpected login error.', username: username });
+    }
+  });
+  
+
+// Dashboard: USERS
+app.get('/dashboard/users', ensureAuthenticated, async (req, res) => {
+    try {
+      const users = [];
+  
+      // 1. Pull all users
+      await new Promise((resolve, reject) => {
+        ad.findUsers((err, results) => {
+          if (err) return reject(err);
+          if (results) {
+            results.forEach(user => {
+              if (user.sAMAccountName) {
+                const dnParts = (user.distinguishedName || '').split(',');
+                const userOu = dnParts.filter(part => part.startsWith('OU=')).map(ou => ou.replace('OU=', '')).join('/');
+                users.push({
+                  name: user.cn || '',
+                  username: user.sAMAccountName || '',
+                  email: user.userPrincipalName || '',
+                  ou: userOu || '',
+                  disabled: (parseInt(user.userAccountControl || 0) & 2) !== 0
+                });
+              }
+            });
+          }
+          resolve();
+        });
+      });
+  
+      // 2. Pull OUs manually
+      const ouList = [];
+      await new Promise((resolve, reject) => {
+        ad.find({
+          baseDN: 'OU=Black Hawk Users,DC=blackhawk,DC=k12,DC=wi,DC=us',
+          filter: '(objectCategory=organizationalUnit)',
+          attributes: ['ou']
+        }, (err, results) => {
+          if (err) return reject(err);
+      
+          if (results && results.other) {
+            results.other.forEach(ou => {
+              if (ou.ou) {
+                ouList.push(ou.ou);
+              }
+            });
+          }
+          resolve();
+        });
+      });
+  
+      res.render('dashboard', { page: 'users', users, ouList });
+  
+    } catch (error) {
+      console.error('Error loading dashboard/users:', error);
+      res.status(500).send('Error loading users');
+    }
+  });
+
+// Dashboard: GROUPS
+app.get('/dashboard/groups', ensureAuthenticated, (req, res) => {
+  ad.findGroups('CN=*', function(err, groups) {
+    if (err) {
+      console.error('AD group search error:', err);
+      return res.status(500).send('Error reading groups');
+    }
+
+    if (!groups || groups.length === 0) {
+      console.log('No groups found.');
+      return res.render('dashboard', { user: req.session.user, groups: [], users: [], page: 'groups' });
+    }
+
+    const groupList = groups.map(g => g.cn).sort();
+
+    console.log(`Found ${groupList.length} groups.`);
+    res.render('dashboard', { 
+      user: req.session.user, 
+      groups: groupList, 
+      users: [], 
+      page: 'groups' 
+    });
+  });
+});
+
+// API: Get members of a group (return groupDN too)
+app.get('/api/group/members', ensureAuthenticated, (req, res) => {
+  const groupName = req.query.group;
+
+  if (!groupName) return res.status(400).send('Group name required');
+
+  ad.findGroup(groupName, function(err, groupObj) {
+    if (err || !groupObj) {
+      console.error('Error finding group:', err);
+      return res.status(500).send('Group not found');
+    }
+
+    ad.getUsersForGroup(groupName, function(err, users) {
+      if (err) {
+        console.error('Error fetching group members:', err);
+        return res.status(500).send('Error fetching group members');
+      }
+
+      const cleanUsers = (users || []).map(u => ({
+        name: u.cn || 'Unknown',
+        username: u.sAMAccountName || 'Unknown',
+        email: u.userPrincipalName || '',
+        ou: (u.distinguishedName || '').split(',').find(p => p.startsWith('OU='))?.replace('OU=', '') || 'Unknown',
+        disabled: (parseInt(u.userAccountControl || 0) & 2) !== 0
+      }));
+
+      res.json({
+        groupDN: groupObj.dn, 
+        members: cleanUsers
+      });
+    });
+  });
+});
+
+// API: Add user to group
+app.post('/api/group/add', ensureAuthenticated, async (req, res) => {
+    const { username, group } = req.body;
+    const userPrincipalName = `${username}@blackhawk.k12.wi.us`;
+  
+    try {
+      const groupObj = await new Promise((resolve, reject) => {
+        ad.findGroup(group, (err, groupObj) => {
+          if (err || !groupObj) return reject(new Error('Group not found'));
+          resolve(groupObj);
+        });
+      });
+  
+      const groupDN = groupObj.dn;
+  
+      const user = await new Promise((resolve, reject) => {
+        ad.findUser(userPrincipalName, (err, user) => {
+          if (err || !user) return reject(new Error('User not found'));
+          resolve(user);
+        });
+      });
+  
+      const userDN = user.dn;
+  
+      const client = ldap.createClient({
+        url: adConfig.url
+      });
+  
+      await new Promise((resolve, reject) => {
+        client.bind(adConfig.username, adConfig.password, (err) => {
+          if (err) return reject(err);
+          resolve();
+        });
+      });
+  
+      const change = new ldap.Change({
+        operation: 'add',
+        modification: {
+          type: 'member',
+          values: [userDN]
+        }
+      });
+  
+      await new Promise((resolve, reject) => {
+        client.modify(groupDN, change, (err) => {
+          if (err) return reject(err);
+          resolve();
+        });
+      });
+  
+      client.unbind();
+      console.log(`Successfully added ${userPrincipalName} to ${groupDN}`);
+      res.json({ success: true });
+  
+    } catch (err) {
+      console.error('Failed to add user:', err);
+      res.json({ success: false, message: err.message });
+    }
+  });
+  
+  // API: Search users (by name or username)
+app.get('/api/users/search', ensureAuthenticated, (req, res) => {
+    const search = req.query.q;
+    if (!search) return res.json([]);
+  
+    const opts = {
+      filter: `(&(objectCategory=person)(objectClass=user)(|(cn=*${search}*)(sAMAccountName=*${search}*)))`,
+      attributes: ['cn', 'sAMAccountName', 'userPrincipalName'],
+      baseDN: 'OU=Black Hawk Users,DC=blackhawk,DC=k12,DC=wi,DC=us',
+      scope: 'sub',
+      sizeLimit: 20
+    };
+  
+    ad.find(opts, (err, results) => {
+      if (err || !results || !results.users) {
+        console.error('User search error:', err);
+        return res.json([]);
+      }
+  
+      const users = results.users.map(u => ({
+        name: u.cn || '',
+        username: u.sAMAccountName || ''
+      }));
+  
+      res.json(users);
+    });
+  });
+
+// API: Remove user from group (now uses groupDN)
+app.post('/api/group/remove', ensureAuthenticated, async (req, res) => {
+    const { username, groupDN } = req.body;
+    const userPrincipalName = `${username}@blackhawk.k12.wi.us`;
+  
+    try {
+      const user = await new Promise((resolve, reject) => {
+        ad.findUser(userPrincipalName, (err, user) => {
+          if (err || !user) return reject(new Error('User not found'));
+          resolve(user);
+        });
+      });
+  
+      const userDN = user.dn;
+  
+      const client = ldap.createClient({
+        url: adConfig.url
+      });
+  
+      await new Promise((resolve, reject) => {
+        client.bind(adConfig.username, adConfig.password, (err) => {
+          if (err) return reject(err);
+          resolve();
+        });
+      });
+  
+      const change = new ldap.Change({
+        operation: 'delete',
+        modification: {
+          type: 'member',
+          values: [userDN]
+        }
+      });
+  
+      await new Promise((resolve, reject) => {
+        client.modify(groupDN, change, (err) => {
+          if (err) return reject(err);
+          resolve();
+        });
+      });
+  
+      client.unbind();
+      console.log(`Successfully removed ${userPrincipalName} from ${groupDN}`);
+      res.json({ success: true });
+  
+    } catch (err) {
+      console.error('Failed to remove user:', err);
+      res.json({ success: false, message: err.message });
+    }
+  });
+
+  app.get('/api/group/dn', ensureAuthenticated, async (req, res) => {
+    const groupName = req.query.group;
+    if (!groupName) {
+      return res.status(400).json({ success: false, message: 'Group name required' });
+    }
+  
+    try {
+      const groupObj = await new Promise((resolve, reject) => {
+        ad.findGroup(groupName, (err, group) => {
+          if (err || !group) return reject(err);
+          resolve(group);
+        });
+      });
+  
+      res.json({ success: true, groupDN: groupObj.dn });
+    } catch (error) {
+      console.error('Error in /api/group/dn:', error);
+      res.status(500).json({ success: false, message: error.message });
+    }
+  });
+  
+
+app.get('/api/user/details', ensureAuthenticated, async (req, res) => {
+    const username = req.query.username;
+    if (!username) {
+      return res.status(400).json({ success: false, message: 'Username required' });
+    }
+  
+    const userPrincipalName = `${username}@blackhawk.k12.wi.us`;
+  
+    try {
+      const user = await new Promise((resolve, reject) => {
+        ad.findUser(userPrincipalName, (err, user) => {
+          if (err || !user) return reject(new Error('User not found'));
+          resolve(user);
+        });
+      });
+  
+      const groups = await new Promise((resolve, reject) => {
+        ad.getGroupMembershipForUser(userPrincipalName, (err, groups) => {
+          if (err) return reject(err);
+          resolve(groups || []);
+        });
+      });
+  
+      const allGroups = await new Promise((resolve, reject) => {
+        ad.findGroups('', (err, groups) => {  // Find all groups
+          if (err) return reject(err);
+          resolve(groups.map(g => g.cn));
+        });
+      });
+  
+      const ous = [
+        'OU=Staff,OU=Black Hawk Users,DC=blackhawk,DC=k12,DC=wi,DC=us',
+        'OU=Students,OU=Black Hawk Users,DC=blackhawk,DC=k12,DC=wi,DC=us'
+      ];
+  
+      const dnParts = (user.distinguishedName || '').split(',');
+      const currentOu = dnParts.filter(part => part.startsWith('OU=')).map(ou => ou.replace('OU=', '')).join('/');
+  
+      const userData = {
+        name: user.cn || '',
+        username: user.sAMAccountName || '',
+        email: user.userPrincipalName || '',
+        ou: currentOu || '',
+        disabled: (parseInt(user.userAccountControl || 0) & 2) !== 0
+      };
+  
+      res.json({
+        success: true,
+        user: userData,
+        groups: groups.map(g => g.cn || g.name),
+        allGroups,   // ✅ now included
+        ous
+      });
+  
+    } catch (error) {
+      console.error('Error in /api/user/details:', error);
+      res.status(500).json({ success: false, message: error.message });
+    }
+  });
+  
+app.post('/api/user/move-ou', ensureAuthenticated, async (req, res) => {
+    const { username, newOu } = req.body;
+    if (!username || !newOu) {
+      return res.status(400).json({ success: false, message: 'Missing username or new OU' });
+    }
+  
+    try {
+      // Find user's current DN
+      const user = await new Promise((resolve, reject) => {
+        ad.findUsers({ filter: `(sAMAccountName=${username})` }, (err, users) => {
+          if (err || !users || users.length === 0) return reject(new Error('User not found'));
+          resolve(users[0]);
+        });
+      });
+  
+      const currentDn = user.dn;
+      const cn = user.cn;
+      const newDn = `CN=${cn},${newOu}`;
+  
+      console.log(`Moving user from ${currentDn} to ${newDn}`);
+  
+      // Create new ldapjs client manually
+      const client = ldap.createClient({
+        url: 'ldap://172.20.1.100'
+      });
+  
+      // Bind (login) to LDAP
+      client.bind('tvadmin@blackhawk.k12.wi.us', 'Geemoof9.!', (err) => {
+        if (err) {
+          console.error('LDAP Bind Error:', err);
+          return res.status(500).json({ success: false, message: 'LDAP bind failed' });
+        }
+  
+        // Move the user
+        client.modifyDN(currentDn, newDn, (err) => {
+          client.unbind(); // Always unbind after LDAP operations
+  
+          if (err) {
+            console.error('LDAP modifyDN error:', err);
+            return res.status(500).json({ success: false, message: err.message });
+          }
+  
+          res.json({ success: true });
+        });
+      });
+  
+    } catch (error) {
+      console.error('Error in /api/user/move-ou:', error);
+      res.status(500).json({ success: false, message: error.message });
+    }
+  });
+
+app.post('/api/user/disable', ensureAuthenticated, async (req, res) => {
+    const { username } = req.body;
+    if (!username) {
+      return res.status(400).json({ success: false, message: 'Username required' });
+    }
+  
+    try {
+      const user = await new Promise((resolve, reject) => {
+        ad.findUser(username, (err, user) => {
+          if (err || !user) return reject(new Error('User not found'));
+          resolve(user);
+        });
+      });
+  
+      const dn = user.dn;
+      let flags = parseInt(user.userAccountControl || 0);
+      flags = flags | 2; // Set DISABLED bit (add 0x2)
+  
+      const attribute = new ldap.Attribute({
+        type: 'userAccountControl',
+        values: [flags.toString()] // ✅ use values, not vals
+      });
+  
+      const change = new ldap.Change({
+        operation: 'replace',
+        modification: attribute
+      });
+  
+      const client = ldap.createClient({ url: 'ldap://172.20.1.100' });
+  
+      client.bind('tvadmin@blackhawk.k12.wi.us', 'Geemoof9.!', (err) => {
+        if (err) {
+          console.error('LDAP bind failed:', err);
+          return res.status(500).json({ success: false, message: 'LDAP bind failed' });
+        }
+  
+        client.modify(dn, change, (err) => {
+          client.unbind();
+          if (err) {
+            console.error('LDAP modify error:', err);
+            return res.status(500).json({ success: false, message: err.message });
+          }
+          res.json({ success: true });
+        });
+      });
+  
+    } catch (error) {
+      console.error('Error disabling user:', error);
+      res.status(500).json({ success: false, message: error.message });
+    }
+  });
+  
+
+  app.post('/api/user/enable', ensureAuthenticated, async (req, res) => {
+    const { username } = req.body;
+    if (!username) {
+      return res.status(400).json({ success: false, message: 'Username required' });
+    }
+  
+    try {
+      const user = await new Promise((resolve, reject) => {
+        ad.findUser(username, (err, user) => {
+          if (err || !user) return reject(new Error('User not found'));
+          resolve(user);
+        });
+      });
+  
+      const dn = user.dn;
+      let flags = parseInt(user.userAccountControl || 0);
+      flags = flags & ~2; // Clear DISABLED bit (0x2)
+  
+      // ✅ Fixed: using values instead of vals
+      const attribute = new ldap.Attribute({
+        type: 'userAccountControl',
+        values: [flags.toString()]
+      });
+  
+      const change = new ldap.Change({
+        operation: 'replace',
+        modification: attribute
+      });
+  
+      const client = ldap.createClient({ url: 'ldap://172.20.1.100' });
+  
+      client.bind('tvadmin@blackhawk.k12.wi.us', 'Geemoof9.!', (err) => {
+        if (err) {
+          console.error('LDAP bind failed:', err);
+          return res.status(500).json({ success: false, message: 'LDAP bind failed' });
+        }
+  
+        client.modify(dn, change, (err) => {
+          client.unbind();
+          if (err) {
+            console.error('LDAP modify error:', err);
+            return res.status(500).json({ success: false, message: err.message });
+          }
+          res.json({ success: true });
+        });
+      });
+  
+    } catch (error) {
+      console.error('Error enabling user:', error);
+      res.status(500).json({ success: false, message: error.message });
+    }
+  });
+
+  app.post('/api/user/reset-password', ensureAuthenticated, async (req, res) => {
+    const { username, newPassword } = req.body;
+    const userPrincipalName = `${username}@blackhawk.k12.wi.us`;
+  
+    try {
+      const user = await new Promise((resolve, reject) => {
+        ad.findUser(userPrincipalName, (err, user) => {
+          if (err || !user) return reject(new Error('User not found'));
+          resolve(user);
+        });
+      });
+  
+      const userDN = user.dn;
+  
+      const client = ldap.createClient({
+        url: adConfig.url
+      });
+  
+      await new Promise((resolve, reject) => {
+        client.bind(adConfig.username, adConfig.password, (err) => {
+          if (err) return reject(err);
+          resolve();
+        });
+      });
+  
+      // Microsoft Active Directory expects UnicodePwd
+      const passwordChange = new ldap.Change({
+        operation: 'replace',
+        modification: {
+          type: 'unicodePwd',
+          values: [Buffer.from(`"${newPassword}"`, 'utf16le')]
+        }
+      });
+  
+      await new Promise((resolve, reject) => {
+        client.modify(userDN, passwordChange, (err) => {
+          if (err) return reject(err);
+          resolve();
+        });
+      });
+  
+      client.unbind();
+      console.log(`Password reset for ${userPrincipalName}`);
+      res.json({ success: true });
+  
+    } catch (err) {
+      console.error('Failed to reset password:', err);
+      res.json({ success: false, message: err.message });
+    }
+  });
+  
+  
+// Logout
+app.get('/logout', (req, res) => {
+  req.session.destroy();
+  res.redirect('/');
+});
+
+// ----------------------
+app.listen(PORT, () => {
+  console.log(`Server running at http://localhost:${PORT}`);
+});

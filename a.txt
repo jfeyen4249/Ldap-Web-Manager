@@ -1,0 +1,8 @@
+AD_URL=ldaps://BHDC1.blackhawk.k12.wi.us:636
+AD_BASEDN=DC=blackhawk,DC=k12,DC=wi,DC=us
+
+
+AD_USERNAME=tvadmin@blackhawk.k12.wi.us
+AD_PASSWORD=Geemoof9.!
+AD_DOMAIN=blackhawk.k12.wi.us
+AD_DEFAULT_OU=OU=Black Hawk Users,DC=blackhawk,DC=k12,DC=wi,DC=us

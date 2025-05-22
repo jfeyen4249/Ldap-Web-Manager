@@ -1,0 +1,9 @@
+.env
+/node_modules
+otp.js
+tests/test.js
+/public/pctools/pctools_rust_win
+.DS_Store
+public/.DS_Store
+public/pctools/.DS_Store
+.DS_Store

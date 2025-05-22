@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>User Manager</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- AlertifyJS -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/alertifyjs@1.13.1/build/css/alertify.min.css"/>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/alertifyjs@1.13.1/build/css/themes/default.min.css"/>
+  <script src="https://cdn.jsdelivr.net/npm/alertifyjs@1.13.1/build/alertify.min.js"></script>
+</head>
+<body class="bg-gray-100 p-6">
+
+  <!-- Navigation -->
+  <div class="flex justify-between items-center mb-6">
+    <h1 class="text-3xl font-bold">User Manager</h1>
+    <div class="space-x-4">
+      <button onclick="openCreateUserModal()" class="bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded">
+        Add New User
+      </button>
+      <a href="/dashboard/users" class="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600">Users</a>
+      <a href="/dashboard/groups" class="bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600">Groups</a>
+      <a href="/logout" class="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600">Logout</a>
+    </div>
+  </div>
+
+  {{!-- Users Page Filter --}}
+  {{#if (eq page 'users')}}
+    <div class="mb-6 flex flex-wrap gap-4 items-end">
+      <div class="flex flex-col">
+        <label for="ouSelect" class="block mb-1 text-lg font-semibold">Filter by OU:</label>
+        <select id="ouSelect" class="border p-2 rounded w-72" onchange="filterUsers()">
+          <option value="all">All</option>
+          {{#each ouList}}
+            <option value="{{this}}">{{this}}</option>
+          {{/each}}
+        </select>
+      </div>
+      <div class="flex flex-col">
+        <label for="userSearchBox" class="block mb-1 text-lg font-semibold">Search Users:</label>
+        <input id="userSearchBox"
+               type="text"
+               placeholder="Search by name, username, or email"
+               class="border p-2 rounded w-72"
+               oninput="filterUsers()" />
+      </div>
+    </div>
+  {{/if}}
+
+  {{!-- Groups Page Filter --}}
+  {{#if (eq page 'groups')}}
+    <div class="mb-6">
+      <label for="groupSelect" class="block mb-2 text-lg font-semibold">Select a Group:</label>
+      <select id="groupSelect" class="border p-2 rounded w-1/3">
+        <option value="">Select a group</option>
+        {{#each groups}}
+          <option value="{{this}}">{{this}}</option>
+        {{/each}}
+      </select>
+      <button onclick="addUserToGroup()"
+              class="bg-yellow-500 text-white px-2 py-1 rounded ml-2">
+        Add User to group
+      </button>
+    </div>
+  {{/if}}
+
+  <!-- User Table -->
+  <div class="bg-white shadow rounded p-4 overflow-x-auto">
+    <table id="userTable" class="min-w-full table-auto">
+      <thead class="bg-gray-200">
+        <tr>
+          <th class="px-4 py-2 text-left">Name</th>
+          <th class="px-4 py-2 text-left">Username</th>
+          <th class="px-4 py-2 text-left">Email</th>
+          <th class="px-4 py-2 text-left">OU</th>
+          <th class="px-4 py-2 text-left">Status</th>
+          {{#if (eq page 'groups')}}<th class="px-4 py-2 text-left">Actions</th>{{/if}}
+        </tr>
+      </thead>
+      <tbody>
+        {{#each users}}
+          <tr class="border-b hover:bg-gray-100"
+              data-ou="{{this.ou}}"
+              {{#if (eq ../page 'users')}}onclick="editUser('{{this.username}}')"{{/if}}>
+            <td class="px-4 py-2">{{this.name}}</td>
+            <td class="px-4 py-2">{{this.username}}</td>
+            <td class="px-4 py-2">{{this.email}}</td>
+            <td class="px-4 py-2">{{this.ou}}</td>
+            <td class="px-4 py-2">
+              {{#if this.disabled}}
+                <span class="text-red-600 font-semibold">Disabled</span>
+              {{else}}
+                <span class="text-green-600 font-semibold">Enabled</span>
+              {{/if}}
+            </td>
+            {{#if (eq ../page 'groups')}}
+              <td class="px-4 py-2">
+                <button onclick="removeUserFromGroup('{{this.username}}')"
+                        class="bg-red-500 text-white px-2 py-1 rounded">
+                  Remove
+                </button>
+              </td>
+            {{/if}}
+          </tr>
+        {{/each}}
+      </tbody>
+    </table>
+  </div>
+
+  <!-- JavaScript -->
+  <script>
+    {{#if (eq page 'users')}}
+      // Filter by OU and search text
+      function filterUsers() {
+        const selectedOU = document.getElementById('ouSelect').value;
+        const search     = document.getElementById('userSearchBox').value.toLowerCase();
+        const rows       = document.querySelectorAll('#userTable tbody tr');
+
+        rows.forEach(row => {
+          const name     = row.children[0].innerText.toLowerCase();
+          const username = row.children[1].innerText.toLowerCase();
+          const email    = row.children[2].innerText.toLowerCase();
+          const rowOU    = row.dataset.ou;
+
+          const matchesOU =
+            selectedOU === 'all' ||
+            rowOU === selectedOU ||
+            rowOU.includes(`/${selectedOU}`) ||
+            rowOU.startsWith(`${selectedOU}/`);
+
+          const matchesSearch =
+            !search ||
+            name.includes(search) ||
+            username.includes(search) ||
+            email.includes(search);
+
+          row.style.display = (matchesOU && matchesSearch) ? '' : 'none';
+        });
+      }
+
+      // Wire up events
+      document.getElementById('ouSelect').addEventListener('change', filterUsers);
+      document.getElementById('userSearchBox').addEventListener('input', filterUsers);
+    {{/if}}
+
+    {{#if (eq page 'groups')}}
+      // Load group members
+      let selectedGroupDN = '';
+      document.getElementById('groupSelect').addEventListener('change', async function() {
+        const group = this.value;
+        if (!group) return;
+        const res = await fetch(`/api/group/members?group=${encodeURIComponent(group)}`);
+        const data = await res.json();
+        selectedGroupDN = data.groupDN;
+        const tbody = document.querySelector('#userTable tbody');
+        tbody.innerHTML = '';
+        data.members.forEach(u => {
+          tbody.insertAdjacentHTML('beforeend', `
+            <tr class="border-b">
+              <td class="px-4 py-2">${u.name}</td>
+              <td class="px-4 py-2">${u.username}</td>
+              <td class="px-4 py-2">${u.email}</td>
+              <td class="px-4 py-2">${u.ou}</td>
+              <td class="px-4 py-2">${u.disabled
+                ? '<span class="text-red-600 font-semibold">Disabled</span>'
+                : '<span class="text-green-600 font-semibold">Enabled</span>'}
+              </td>
+              <td class="px-4 py-2">
+                <button onclick="removeUserFromGroup('${u.username}')"
+                        class="bg-red-500 text-white px-2 py-1 rounded">
+                  Remove
+                </button>
+              </td>
+            </tr>`);
+        });
+      });
+
+      async function removeUserFromGroup(username) {
+        if (!selectedGroupDN) {
+          alertify.error('Select a group first.');
+          return;
+        }
+        if (!confirm(`Remove ${username} from group?`)) return;
+        const res = await fetch('/api/group/remove', {
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({ username, groupDN: selectedGroupDN })
+        });
+        const result = await res.json();
+        if (result.success) {
+          alertify.success(`Removed ${username}`);
+          document.getElementById('groupSelect').dispatchEvent(new Event('change'));
+        } else {
+          alertify.error(`Failed to remove user: ${result.message}`);
+        }
+      }
+    {{/if}}
+
+    // Common modals and actions
+    async function addUserToGroup() {
+      const group = document.getElementById('groupSelect').value;
+      if (!group) { alertify.error('Select a group first.'); return; }
+      let inputHTML = `
+        <div style="width:100%;max-width:400px;">
+          <input id="userSearchInput" type="text" placeholder="Search by name or username"
+                 class="border p-2 rounded w-full mb-2" oninput="searchUsers()" />
+          <div id="userSearchResults" class="max-h-60 overflow-y-auto border rounded"></div>
+        </div>`;
+      const dialog = alertify.confirm('Add User to Group', inputHTML,
+        () => {}, () => { alertify.error('Cancelled'); }
+      ).set({ labels:{ok:'',cancel:'Close'}, resizable:true, movable:true, transition:'zoom', padding:false, closable:false });
+      dialog.elements.dialog.style.width = "auto";
+      dialog.elements.dialog.style.maxWidth = "460px";
+      dialog.elements.dialog.style.minWidth = "360px";
+      dialog.elements.dialog.style.height = "500px";
+
+      window.searchUsers = async function() {
+        const q = document.getElementById('userSearchInput').value.trim();
+        const resultsDiv = document.getElementById('userSearchResults');
+        resultsDiv.innerHTML = '';
+        if (q.length < 2) return;
+        const res = await fetch(`/api/users/search?q=${encodeURIComponent(q)}`);
+        const list = await res.json();
+        list.forEach(u => {
+          const div = document.createElement('div');
+          div.className = 'p-2 border-b hover:bg-gray-200 cursor-pointer';
+          div.innerText = `${u.name} (${u.username})`;
+          div.onclick = () => selectUserToAdd(u.username);
+          resultsDiv.appendChild(div);
+        });
+      };
+
+      window.selectUserToAdd = async function(username) {
+        if (!confirm(`Add ${username} to ${group}?`)) return;
+        const res = await fetch('/api/group/add', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ username, group })
+        });
+        const result = await res.json();
+        if (result.success) {
+          alertify.success(`Added ${username} to ${group}`);
+          document.getElementById('groupSelect').dispatchEvent(new Event('change'));
+        } else {
+          alertify.error(`Failed to add user: ${result.message}`);
+        }
+        alertify.confirm().close();
+      };
+    }
+
+    async function editUser(username) {
+      try {
+        const res = await fetch(`/api/user/details?username=${encodeURIComponent(username)}`);
+        const data = await res.json();
+        if (!data.success) { alertify.error('Failed to load user details.'); return; }
+        const user      = data.user;
+        const groups    = data.groups    || [];
+        const allGroups = data.allGroups || [];
+        const ous       = data.ous       || [];
+
+        const tabsHTML = `
+          <div class="flex border-b mb-4">
+            <button onclick="showTab('infoTab')" id="tabInfoBtn" class="flex-1 p-2 hover:bg-gray-200 text-center">User Info</button>
+            <button onclick="showTab('groupsTab')" id="tabGroupsBtn" class="flex-1 p-2 hover:bg-gray-200 text-center">Groups</button>
+            <button onclick="showTab('ouTab')" id="tabOuBtn" class="flex-1 p-2 hover:bg-gray-200 text-center">OU</button>
+          </div>
+          <div id="infoTab">
+            <label>Name:</label>
+            <input id="editName" value="${user.name}" class="border p-2 w-full mb-2 rounded"/>
+            <label>Username:</label>
+            <input id="editUsername" value="${user.username}" class="border p-2 w-full mb-2 rounded"/>
+            <label>Email:</label>
+            <input id="editEmail" value="${user.email}" class="border p-2 w-full mb-2 rounded"/>
+            <div class="flex gap-2 mt-4">
+              <button onclick="resetUserPassword('${user.username}')" class="bg-yellow-500 hover:bg-yellow-600 text-white px-4 py-2 rounded">Reset Password</button>
+              ${
+                user.disabled
+                  ? `<button onclick="enableUser('${user.username}')" class="bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded">Enable Account</button>`
+                  : `<button onclick="disableUser('${user.username}')" class="bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded">Disable Account</button>`
+              }
+            </div>
+          </div>
+          <div id="groupsTab" style="display:none;">
+            <div class="grid grid-cols-2 gap-2">
+              ${allGroups.map(g => `
+                <label class="flex items-center space-x-2">
+                  <input type="checkbox" value="${g}" ${groups.includes(g)?'checked':''} onchange="toggleGroup('${user.username}', this)"/>
+                  <span>${g}</span>
+                </label>
+              `).join('')}
+            </div>
+          </div>
+          <div id="ouTab" style="display:none;">
+            <select id="moveOuSelect" class="border p-2 rounded w-full mb-2">
+              ${ous.map(ouDN => {
+                const display = ouDN.split(',')
+                                     .filter(r=>r.startsWith('OU='))
+                                     .map(r=>r.replace('OU=',''))
+                                     .join(' / ');
+                return `<option value="${ouDN}" ${display===user.ou?'selected':''}>${display}</option>`;
+              }).join('')}
+            </select>
+            <button onclick="moveUserOu('${user.username}')" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded">Move User</button>
+          </div>`;
+
+        const dialog = alertify.confirm(`Manage User: ${user.name}`, tabsHTML,
+          () => saveUserEdits(username), () => {}
+        ).set({ labels:{ok:'Save Changes',cancel:'Close'}, resizable:true, movable:true, transition:'fade', padding:true, closable:true });
+
+        dialog.elements.dialog.style.width  = '700px';
+        dialog.elements.dialog.style.height = '500px';
+        showTab('infoTab');
+      } catch (err) {
+        console.error('editUser error:', err);
+        alertify.error('Error loading user details.');
+      }
+    }
+
+    function showTab(tabId) {
+      ['infoTab','groupsTab','ouTab'].forEach(id => document.getElementById(id).style.display='none');
+      document.getElementById(tabId).style.display='block';
+      ['tabInfoBtn','tabGroupsBtn','tabOuBtn'].forEach(btn=>{
+        document.getElementById(btn).classList.remove('bg-gray-300');
+      });
+      const map={'infoTab':'tabInfoBtn','groupsTab':'tabGroupsBtn','ouTab':'tabOuBtn'};
+      document.getElementById(map[tabId]).classList.add('bg-gray-300');
+    }
+
+    async function moveUserOu(username) {
+      const newOu = document.getElementById('moveOuSelect').value;
+      if (!newOu) { alertify.error('No OU selected'); return; }
+      if (!confirm(`Move ${username}?`)) return;
+      try {
+        const res = await fetch('/api/user/move-ou',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username,newOu})});
+        const result = await res.json();
+        result.success?alertify.success('User moved'):alertify.error(`Move failed: ${result.message}`);
+      } catch(e){ console.error(e); alertify.error('Move error'); }
+    }
+
+    async function enableUser(username) {
+      try {
+        const res = await fetch('/api/user/enable',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username})});
+        const json = await res.json();
+        json.success?alertify.success(`✅ User "${username}" enabled.`):alertify.error(`❌ ${json.message}`);
+      } catch(e){ console.error(e); alertify.error('Enable error'); }
+    }
+
+    async function disableUser(username) {
+      try {
+        const res = await fetch('/api/user/disable',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username})});
+        const json = await res.json();
+        json.success?alertify.success('User disabled'):alertify.error('Disable failed');
+      } catch(e){ console.error(e); alertify.error('Disable error'); }
+    }
+
+    async function resetUserPassword(username) {
+      alertify.prompt('Reset Password',`New password for ${username}:`,'',
+        async (evt,value)=>{
+          if(!value){alertify.error('Cannot be empty');return;}
+          try {
+            const res = await fetch('/api/user/reset-password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username,newPassword:value})});
+            const json = await res.json();
+            json.success?alertify.success('Password reset'):alertify.error(`Failed: ${json.message}`);
+          } catch(e){console.error(e);alertify.error('Reset error');}
+        },
+        ()=>{alertify.error('Canceled');}
+      ).set('labels',{ok:'Reset',cancel:'Cancel'});
+    }
+
+    async function saveUserEdits(username) {
+      const newName     = document.getElementById('editName').value;
+      const newUsername = document.getElementById('editUsername').value;
+      const newEmail    = document.getElementById('editEmail').value;
+      try {
+        const res = await fetch('/api/user/update-info',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({oldUsername:username,newName,newUsername,newEmail})});
+        const json = await res.json();
+        if(json.success){alertify.success('Updated');setTimeout(()=>location.reload(),1500);}
+        else alertify.error(json.message||'Update failed');
+      } catch(e){console.error(e);alertify.error('Save error');}
+    }
+
+    async function openCreateUserModal() {
+  try {
+    // 1️⃣ Fetch all groups and OUs from the server
+    const res = await fetch('/api/user/groups-ous');
+    const data = await res.json();
+    if (!data.success) {
+      alertify.error('Failed to load groups/OUs.');
+      return;
+    }
+    const groups = data.groups; // array of CN strings
+    const ous    = data.ous;    // array of { dn: string, path: string }
+
+    // 2️⃣ Build the modal HTML with three tabs: User Info, Groups, OU
+    const tabsHTML = `
+      <div class="flex border-b mb-4">
+        <button onclick="showTab('infoTab')" id="tabInfoBtn" class="flex-1 p-2 hover:bg-gray-200 text-center bg-gray-100">User Info</button>
+        <button onclick="showTab('groupsTab')" id="tabGroupsBtn" class="flex-1 p-2 hover:bg-gray-200 text-center">Groups</button>
+        <button onclick="showTab('ouTab')"    id="tabOuBtn"     class="flex-1 p-2 hover:bg-gray-200 text-center">OU</button>
+      </div>
+
+      <!-- Info Tab -->
+      <div id="infoTab">
+        <label>Name:</label>
+        <input id="newName" type="text" class="border p-2 w-full mb-2 rounded" />
+
+        <label>Username:</label>
+        <input id="newUsername" type="text" class="border p-2 w-full mb-2 rounded" />
+
+        <label>Email:</label>
+        <input id="newEmail" type="email" class="border p-2 w-full mb-2 rounded" />
+
+        <label>Password:</label>
+        <input id="newPassword" type="password" class="border p-2 w-full mb-2 rounded" />
+      </div>
+
+      <!-- Groups Tab -->
+      <div id="groupsTab" style="display:none;">
+        <div id="newUserGroups" class="grid grid-cols-2 gap-2">
+          ${groups.map(cn => `
+            <label class="flex items-center space-x-2">
+              <input type="checkbox" value="${cn}" />
+              <span>${cn}</span>
+            </label>
+          `).join('')}
+        </div>
+      </div>
+
+      <!-- OU Tab -->
+      <div id="ouTab" style="display:none;">
+        <select id="newUserOu" class="border p-2 rounded w-full">
+          ${ous.map(({ dn, path }) => `
+            <option value="${dn}">${path}</option>
+          `).join('')}
+        </select>
+      </div>
+    `;
+
+    // 3️⃣ Open the Alertify modal
+    const dialog = alertify.confirm('Create New User', tabsHTML,
+      // ✅ on OK:
+      function () {
+        createNewUser(); 
+      },
+      // ❌ on Cancel:
+      function () {
+        // nothing
+      }
+    ).set({
+      labels: { ok: 'Create', cancel: 'Cancel' },
+      resizable: true,
+      movable: true,
+      transition: 'fade',
+      padding: true,
+      closable: true,
+      pinnable: false
+    });
+
+    // 4️⃣ Size the dialog and show the first tab
+    dialog.elements.dialog.style.width  = '700px';
+    dialog.elements.dialog.style.height = '500px';
+    showTab('infoTab');
+
+  } catch (error) {
+    console.error('openCreateUserModal error:', error);
+    alertify.error('Failed to open create user modal.');
+  }
+}
+
+
+    async function createNewUser() {
+      const name     = document.getElementById('newName').value.trim();
+      const username = document.getElementById('newUsername').value.trim();
+      const email    = document.getElementById('newEmail').value.trim();
+      const password = document.getElementById('newPassword').value.trim();
+      const selectedGroups = Array.from(document.querySelectorAll('#groupsTab input:checked')).map(cb=>cb.value);
+      const selectedOu     = document.getElementById('newUserOu').value;
+      if (!name||!username||!email||!password||!selectedOu) return alertify.error('Fill all fields.');
+      try {
+        const res = await fetch('/api/user/create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,username,email,password,groups:selectedGroups,ou:selectedOu})});
+        const json = await res.json();
+        json.success?alertify.success('Created')&&setTimeout(()=>location.reload(),1000):alertify.error(json.message||'Create failed');
+      } catch(e){console.error(e);alertify.error('createNewUser error');}
+    }
+  </script>
+</body>
+</html>
