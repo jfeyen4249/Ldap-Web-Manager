@@ -1,0 +1,8 @@
+AD_URL=ldaps://domain.local:636
+AD_BASEDN=DC=domainDC=local
+
+
+AD_USERNAME= ldap username
+AD_PASSWORD= ldap password
+AD_DOMAIN=doamin.loca
+AD_DEFAULT_OU=OU=doamin Users,DC=domain,DC=local
